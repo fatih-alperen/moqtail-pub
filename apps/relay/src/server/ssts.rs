@@ -195,7 +195,9 @@ impl SstsState {
   ///
   /// Both come from one read of the manager, so a set cannot appear between the
   /// two reads and show up without its counter. They are copies: no algorithm
-  /// runs while a lock is held.
+  /// runs while a lock is held. The stream counts are send-side: a stream is
+  /// counted from creation until the relay releases it after the last write or
+  /// a reset, not until its FIN is acknowledged.
   pub async fn decision_snapshot(&self) -> (Vec<SetSnapshot>, HashMap<u64, u64>) {
     let manager = self.switching_sets.read().await;
     (
@@ -206,6 +208,11 @@ impl SstsState {
 
   /// A forwarding stream started for this relay track. No-op when the track is
   /// not in a switching set, so non-SSTS traffic pays nothing.
+  ///
+  /// The depth is a send-side interval: it opens here and closes when the relay
+  /// has written the last byte, resets the stream, or the peer stops it. The
+  /// wait for a FIN-ACK is deliberately outside it, because that wait grows
+  /// with RTT and would make an idle long-RTT path read as congested.
   ///
   /// Every path that drops a stream from the send-stream map must call
   /// `on_stream_closed` for it as well, or the set's depth never comes back
@@ -218,8 +225,8 @@ impl SstsState {
       .note_stream_opened(relay_track_id);
   }
 
-  /// A forwarding stream of this relay track ended: finished, reset, or
-  /// stopped by the peer.
+  /// A forwarding stream of this relay track no longer counts against its set:
+  /// the relay finished writing it, reset it, or the peer stopped it.
   pub async fn on_stream_closed(&self, relay_track_id: u64) {
     self
       .switching_sets

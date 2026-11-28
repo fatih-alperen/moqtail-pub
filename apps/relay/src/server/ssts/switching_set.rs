@@ -145,15 +145,17 @@ impl SwitchingSetManager {
     self.epoch.fetch_add(1, Ordering::Release);
   }
 
-  /// A forwarding stream opened for the set this relay track belongs to.
+  /// A forwarding stream opened for the set this relay track belongs to. The
+  /// count is send-side; it is released by `note_stream_closed` when the relay
+  /// stops writing, not when the peer acknowledges the FIN.
   pub fn note_stream_opened(&mut self, relay_track_id: u64) {
     if let Some(set_id) = self.relay_track_to_set.get(&relay_track_id) {
       *self.open_streams.entry(*set_id).or_default() += 1;
     }
   }
 
-  /// A forwarding stream of this relay track ended, by finishing, being reset
-  /// or being stopped by the peer.
+  /// A forwarding stream of this relay track stopped occupying send-side
+  /// depth: the relay finished writing it, reset it, or the peer stopped it.
   pub fn note_stream_closed(&mut self, relay_track_id: u64) {
     let Some(set_id) = self.relay_track_to_set.get(&relay_track_id).copied() else {
       return;
@@ -166,8 +168,9 @@ impl SwitchingSetManager {
     }
   }
 
-  /// Live forwarding streams per set, for the algorithms' input. A set with no
-  /// entry has no streams.
+  /// Send-side forwarding streams per set, for the algorithms' input: opened
+  /// and not yet released after the relay's last write or a reset. A set with
+  /// no entry has no streams.
   pub fn open_streams(&self) -> HashMap<u64, u64> {
     self.open_streams.clone()
   }

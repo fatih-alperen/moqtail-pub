@@ -12,8 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Backpressure-driven tier selection: how many streams are still in flight,
-//! rather than how much bandwidth is estimated to be available.
+//! Backpressure-driven tier selection: how many forwarding streams the relay
+//! is still writing, rather than how much bandwidth is estimated to be
+//! available.
 //!
 //! The connection holds one tier index, shared by all its sets. Every active
 //! set forwards the member at that index, clamped to its own ladder, so the

@@ -583,10 +583,12 @@ impl MOQTClient {
   // Remove the stream from the map and finish it
   // if the stream is found, return true, else false
   pub async fn close_stream(&self, stream_key: &SendStreamKey) -> Result<bool> {
-    // Taken without releasing the slot: the stream stays counted against its
-    // switching set until it has actually finished or been reset below, so the
-    // set's depth reflects the bandwidth the stream is still occupying.
-    let stream = self.take_stream(stream_key).await;
+    // The switching-set slot is released when the relay has written the last
+    // byte, not when the peer acknowledges it. The extra RTT a FIN-ACK adds to
+    // the counted interval grows with the path's RTT and would make an idle
+    // long-RTT path look congested; the send-side interval is local, so RTT
+    // only shifts it in time.
+    let stream = self.release_stream(stream_key).await;
     let group_id = stream_key.stream_id.group_id.unwrap_or(0);
 
     if let Some(send_stream) = stream {
@@ -603,8 +605,10 @@ impl MOQTClient {
 
       if timeout.is_zero() {
         // No discard timeout: always close gracefully.
-        // No new data may be written after calling this method.
-        // Completes when the peer has acknowledged all sent data, retransmitting data as needed.
+        // No new data may be written after calling this method. WebTransport
+        // waits here for the peer to acknowledge all sent data; quinn queues
+        // the FIN and returns. The switching-set depth was already released
+        // above, so neither transport's ACK timing affects it.
         stream.finish().await.map_err(|e| {
           error!(
             "close_stream | Failed to finish send stream ({}): {:?} connection_id: {}",
@@ -613,16 +617,11 @@ impl MOQTClient {
           anyhow::anyhow!("Failed to finish send stream ({}): {:?}", stream_key, e)
         })?;
         self.record_stream_end(quic_stream_id, true, StreamEnd::Fin);
-        self
-          .ssts
-          .on_stream_closed(stream_key.stream_id.relay_track_id)
-          .await;
         return Ok(true);
       }
 
       tokio::select! {
         finish_result = stream.finish() => {
-            self.ssts.on_stream_closed(stream_key.stream_id.relay_track_id).await;
             if finish_result.is_ok() {
               self.record_stream_end(quic_stream_id, true, StreamEnd::Fin);
             }
@@ -636,7 +635,6 @@ impl MOQTClient {
                 group_id = %group_id,
                 "Stream timeout on close — resetting"
             );
-            self.ssts.on_stream_closed(stream_key.stream_id.relay_track_id).await;
             // The stream was discarded because it did not finish in time,
             // which is what this code is for: the peer must be able to tell a
             // late delivery apart from a cancelled or failed one.
@@ -670,22 +668,9 @@ impl MOQTClient {
     }
   }
 
-  /// Take a stream out of the map without releasing its switching-set stream
-  /// slot. Private because leaving the slot held is only correct for
-  /// `close_stream`, which keeps the stream counted until it has actually
-  /// finished; everything else goes through `release_stream`.
-  async fn take_stream(
-    &self,
-    stream_key: &SendStreamKey,
-  ) -> Option<Arc<Mutex<TransportSendStream>>> {
-    let send_stream_map = self.get_stream_map(stream_key);
-    let mut send_streams = send_stream_map.write().await;
-    send_streams.remove(stream_key)
-  }
-
-  /// Take a stream out of the map once the caller has finished or reset it,
-  /// and release the switching-set stream slot it held. Returns the stream so
-  /// the caller can still act on it.
+  /// Take a stream out of the map once the relay has finished writing it, or
+  /// once it is reset or stopped, and release the switching-set slot it held.
+  /// Returns the stream so the caller can still act on it.
   ///
   /// The slot is released only when a stream was actually in the map, so a
   /// second removal cannot borrow the count of another stream of the same set.
@@ -693,7 +678,11 @@ impl MOQTClient {
     &self,
     stream_key: &SendStreamKey,
   ) -> Option<Arc<Mutex<TransportSendStream>>> {
-    let removed = self.take_stream(stream_key).await;
+    let removed = {
+      let send_stream_map = self.get_stream_map(stream_key);
+      let mut send_streams = send_stream_map.write().await;
+      send_streams.remove(stream_key)
+    };
     if removed.is_some() {
       self
         .ssts

@@ -2,10 +2,14 @@
 
 A bandwidth allocation algorithm that does not use a bandwidth estimate.
 
-It counts forwarding streams instead: how many are still open on this
+It counts forwarding streams instead: how many are still being written on this
 connection's switching sets, plus how many were reset for delivery timeout
-since the last decision. The connection holds a single tier index, all of its
-active sets forward the member at that index, and the index moves:
+since the last decision. A stream is counted from the moment its set opens it
+until the relay has handed its last byte to the transport, or resets it. The
+FIN-ACK wait is not part of the interval: it grows with RTT, so including it
+would make an idle long-RTT path look congested. The connection holds a single
+tier index, all of its active sets forward the member at that index, and the
+index moves:
 
 - **up** by one after five consecutive groups at depth 1 or below;
 - **down** by one as soon as depth reaches 2, which starts a settle-down period
@@ -13,10 +17,12 @@ active sets forward the member at that index, and the index moves:
   groups deeper than the last, drops the tier again. The period ends when depth
   returns to 1.
 
-The reasoning is that a stream the subscriber has not finished consuming is
-direct evidence of overrun, while a bandwidth estimate is an inference the
-congestion controller makes about the future. The cost is that the signal is
-coarse and arrives late: a group is dropped or delayed before the tier moves.
+The reasoning is that a stream the relay cannot finish writing is direct
+evidence of send-side backpressure, while a bandwidth estimate is an inference
+the congestion controller makes about the future. The signal is local: RTT
+shifts the interval in time but does not widen it. The cost is that the signal
+is coarse and arrives late: a group is dropped or delayed before the tier
+moves.
 
 ## What it does badly
 
