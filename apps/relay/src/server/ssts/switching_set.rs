@@ -50,7 +50,7 @@ impl From<&SwitchingSet> for SetSnapshot {
 #[derive(Debug, Clone)]
 pub enum SwitchingSetError {
   /// The track is already assigned to a different switching set; the
-  /// subscription MUST be rejected with a Parameter Error.
+  /// subscription or update MUST be rejected with a Parameter Error.
   TrackInDifferentSet,
   /// The track does not belong to any switching set.
   TrackNotInSet,
@@ -299,9 +299,36 @@ impl SwitchingSetManager {
     }
   }
 
+  /// Whether a SWITCHING_SET_ASSIGNMENT in a REQUEST_UPDATE may be applied:
+  /// the track must already belong to this exact set. An update cannot move a
+  /// track between sets, because a track belongs to one set at a time.
+  ///
+  /// Read-only, so the handler can refuse the whole update before changing the
+  /// subscription.
+  pub fn validate_update_assignment(
+    &self,
+    full_track_name: &FullTrackName,
+    switching_set_id: u64,
+  ) -> Result<(), SwitchingSetError> {
+    let current_set_id = self
+      .track_to_set
+      .get(full_track_name)
+      .copied()
+      .ok_or(SwitchingSetError::TrackNotInSet)?;
+    if current_set_id != switching_set_id {
+      return Err(SwitchingSetError::TrackInDifferentSet);
+    }
+    if !self.sets.contains_key(&current_set_id) {
+      return Err(SwitchingSetError::TrackNotInSet);
+    }
+    Ok(())
+  }
+
   /// Apply a SWITCHING_SET_ASSIGNMENT that arrives as an update to an existing
   /// subscription (REQUEST_UPDATE).
   ///
+  /// `switching_set_id` must name the set the track already belongs to; a
+  /// different set is refused rather than applied to the current one.
   /// `weight`, `activate` and `rank` are set properties and the most recently
   /// received message wins. `throughput_threshold_kbps` belongs to the member,
   /// so it moves that one track and re-sorts the ladder. `algorithm_id` cannot
@@ -310,15 +337,18 @@ impl SwitchingSetManager {
   /// leave those decisions referring to a different algorithm. It is reported
   /// rather than dropped in silence, which is what the returned warnings are
   /// for.
+  #[allow(clippy::too_many_arguments)]
   pub fn update_assignment(
     &mut self,
     full_track_name: &FullTrackName,
+    switching_set_id: u64,
     algorithm_id: Option<u64>,
     throughput_threshold_kbps: Option<u64>,
     weight: Option<u64>,
     activate: Option<u64>,
     rank: Option<u8>,
   ) -> Result<Vec<String>, SwitchingSetError> {
+    self.validate_update_assignment(full_track_name, switching_set_id)?;
     let set_id = self
       .track_to_set
       .get(full_track_name)
@@ -509,7 +539,7 @@ mod tests {
     assign(&mut manager, &track, 1, 3, 100);
 
     let warnings = manager
-      .update_assignment(&track, Some(0), None, Some(9), Some(0), Some(4))
+      .update_assignment(&track, 3, Some(0), None, Some(9), Some(0), Some(4))
       .unwrap();
     assert!(
       warnings.is_empty(),
@@ -524,12 +554,44 @@ mod tests {
 
     // None fields keep the previous values.
     manager
-      .update_assignment(&track, None, None, None, None, Some(1))
+      .update_assignment(&track, 3, None, None, None, None, Some(1))
       .unwrap();
     let set = manager.get_set_for_track(&track).unwrap();
     assert_eq!(set.weight, 9);
     assert_eq!(set.activate, 0);
     assert_eq!(set.rank, 1);
+  }
+
+  #[test]
+  fn an_update_cannot_move_a_track_to_another_set() {
+    let mut manager = SwitchingSetManager::new();
+    let track = make_track("ns", "t");
+    assign(&mut manager, &track, 1, 3, 500);
+
+    let error = manager
+      .update_assignment(&track, 9, Some(0), Some(999), Some(9), Some(0), Some(4))
+      .unwrap_err();
+    assert!(matches!(error, SwitchingSetError::TrackInDifferentSet));
+
+    // The rejected update changed nothing: moving the track was the whole
+    // request, and the current set keeps every field it had.
+    let set = manager.get_set_for_track(&track).unwrap();
+    assert_eq!(set.id, 3);
+    assert_eq!(set.weight, 5);
+    assert_eq!(set.activate, 2);
+    assert_eq!(set.rank, 0);
+    assert_eq!(set.members[0].throughput_threshold_kbps, 500);
+
+    // The same set id still accepts the set-level and member-level fields.
+    let warnings = manager
+      .update_assignment(&track, 3, None, Some(700), Some(8), Some(1), Some(2))
+      .unwrap();
+    assert!(warnings.is_empty());
+    let set = manager.get_set_for_track(&track).unwrap();
+    assert_eq!(set.weight, 8);
+    assert_eq!(set.activate, 1);
+    assert_eq!(set.rank, 2);
+    assert_eq!(set.members[0].throughput_threshold_kbps, 700);
   }
 
   #[test]
@@ -548,7 +610,7 @@ mod tests {
     let mut manager = SwitchingSetManager::new();
     let track = make_track("ns", "t");
     assert!(matches!(
-      manager.update_assignment(&track, None, None, None, None, None),
+      manager.update_assignment(&track, 3, None, None, None, None, None),
       Err(SwitchingSetError::TrackNotInSet)
     ));
   }
@@ -574,7 +636,7 @@ mod tests {
     );
 
     manager
-      .update_assignment(&low, None, Some(3000), None, None, None)
+      .update_assignment(&low, 3, None, Some(3000), None, None, None)
       .unwrap();
     assert_eq!(
       manager
@@ -599,7 +661,7 @@ mod tests {
     assign(&mut manager, &track, 1, 3, 500);
 
     let warnings = manager
-      .update_assignment(&track, Some(9), None, None, None, None)
+      .update_assignment(&track, 3, Some(9), None, None, None, None)
       .unwrap();
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].contains("algorithm 0"));
@@ -610,7 +672,7 @@ mod tests {
     // Asking for the same algorithm is not a warning.
     assert!(
       manager
-        .update_assignment(&track, Some(0), None, None, None, None)
+        .update_assignment(&track, 3, Some(0), None, None, None, None)
         .unwrap()
         .is_empty()
     );
@@ -682,7 +744,7 @@ mod tests {
 
     let before = read();
     manager
-      .update_assignment(&track, None, None, None, Some(0), None)
+      .update_assignment(&track, 7, None, None, None, Some(0), None)
       .expect("track is in a set");
     assert!(
       read() > before,

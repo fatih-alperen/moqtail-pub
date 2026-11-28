@@ -116,6 +116,41 @@ pub async fn handle_request_update(
     }
   };
 
+  // A track belongs to one switching set at a time. A REQUEST_UPDATE that
+  // names another set cannot be applied to the current one: refuse the whole
+  // update before any parameter or set field changes.
+  let requested_set_id = update_parameters.iter().find_map(|p| match p {
+    MessageParameter::SwitchingSetAssignment {
+      switching_set_id, ..
+    } => Some(*switching_set_id),
+    _ => None,
+  });
+  if let Some(switching_set_id) = requested_set_id {
+    let validation = {
+      let manager = client.ssts.switching_sets.read().await;
+      manager.validate_update_assignment(&full_track_name, switching_set_id)
+    };
+    if let Err(e) = validation {
+      info!("Refusing REQUEST_UPDATE for {:?}: {e}", full_track_name);
+      fail_update(
+        &client,
+        stream_handler,
+        &context,
+        &full_track_name,
+        existing_req_id,
+        // This implementation has no dedicated parameter-error code; the
+        // SUBSCRIBE path uses the same one for the same one-set-per-track rule.
+        RequestError::new(
+          RequestErrorCode::UnsupportedExtension,
+          0,
+          ReasonPhrase::try_new(e.to_string()).unwrap(),
+        ),
+      )
+      .await;
+      return Ok(());
+    }
+  }
+
   client
     .downstream_requests
     .update(existing_req_id, |request| match request {
@@ -139,6 +174,7 @@ pub async fn handle_request_update(
     .iter()
     .find(|p| matches!(p, MessageParameter::SwitchingSetAssignment { .. }))
     && let MessageParameter::SwitchingSetAssignment {
+      switching_set_id,
       algorithm_id,
       throughput_threshold_kbps,
       set_throughput_weight,
@@ -150,6 +186,7 @@ pub async fn handle_request_update(
     let mut manager = client.ssts.switching_sets.write().await;
     match manager.update_assignment(
       &full_track_name,
+      *switching_set_id,
       Some(*algorithm_id),
       Some(*throughput_threshold_kbps),
       Some(*set_throughput_weight),
@@ -161,9 +198,27 @@ pub async fn handle_request_update(
           warn!("SSTS REQUEST_UPDATE for {full_track_name}: {warning}");
         }
       }
-      // The rest of the update still applies; only the switching set part could
-      // not be, and it is the track that is not in a set.
-      Err(e) => warn!("SSTS REQUEST_UPDATE for {full_track_name}: {e}"),
+      // The early check passed, so this is a race with the set's membership.
+      // The set did not change; end the update rather than acknowledge a
+      // request that was not applied.
+      Err(e) => {
+        drop(manager);
+        warn!("SSTS REQUEST_UPDATE for {full_track_name}: {e}");
+        fail_update(
+          &client,
+          stream_handler,
+          &context,
+          &full_track_name,
+          existing_req_id,
+          RequestError::new(
+            RequestErrorCode::UnsupportedExtension,
+            0,
+            ReasonPhrase::try_new(e.to_string()).unwrap(),
+          ),
+        )
+        .await;
+        return Ok(());
+      }
     }
   }
 
