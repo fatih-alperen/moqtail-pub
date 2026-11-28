@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::cli::Transport;
+use crate::cli::{CongestionControl, Transport};
 use anyhow::Result;
 use moqtail::model::control::constant::SUPPORTED_VERSIONS;
 use moqtail::model::control::control_message::{ControlMessage, ControlMessageTrait};
@@ -33,10 +33,20 @@ use tracing::{debug, error, info, warn};
 use wtransport::endpoint::ConnectOptions;
 use wtransport::quinn;
 use wtransport::quinn::TransportConfig;
-use wtransport::quinn::congestion::BbrConfig;
+use wtransport::quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig, NewRenoConfig};
 use wtransport::{ClientConfig, Endpoint, tls};
 
 const CLIENT_SUPPORTED_VERSIONS: &str = "moqt-22";
+
+fn controller_factory(
+  congestion_control: CongestionControl,
+) -> Arc<dyn ControllerFactory + Send + Sync> {
+  match congestion_control {
+    CongestionControl::Bbr => Arc::new(BbrConfig::default()),
+    CongestionControl::Cubic => Arc::new(CubicConfig::default()),
+    CongestionControl::Reno => Arc::new(NewRenoConfig::default()),
+  }
+}
 
 pub struct MoqConnection {
   pub connection: Arc<TransportConnection>,
@@ -52,6 +62,7 @@ impl MoqConnection {
     server: &str,
     no_cert_validation: bool,
     transport: Transport,
+    congestion_control: CongestionControl,
   ) -> Result<(Self, oneshot::Receiver<GoAway>)> {
     let mut setup_options = Vec::new();
 
@@ -80,12 +91,12 @@ impl MoqConnection {
             .try_into()
             .unwrap(),
         );
-        Self::connect_quic(&url.authority, no_cert_validation).await?
+        Self::connect_quic(&url.authority, no_cert_validation, congestion_control).await?
       }
       Transport::WebTransport => {
         // WebTransport derives an https:// URI from the moqt:// URL; the CONNECT
         // request carries the authority/path, so no AUTHORITY/PATH setup options.
-        Self::connect_webtransport(&url.to_https(), no_cert_validation).await?
+        Self::connect_webtransport(&url.to_https(), no_cert_validation, congestion_control).await?
       }
     };
 
@@ -172,6 +183,7 @@ impl MoqConnection {
   async fn connect_webtransport(
     server: &str,
     no_cert_validation: bool,
+    congestion_control: CongestionControl,
   ) -> Result<TransportConnection> {
     let c = ClientConfig::builder().with_bind_default();
 
@@ -187,7 +199,7 @@ impl MoqConnection {
     info!("alpn protocols: {:?}", tls_config.alpn_protocols);
 
     let mut transport_config = TransportConfig::default();
-    transport_config.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    transport_config.congestion_controller_factory(controller_factory(congestion_control));
 
     let config = c
       .with_custom_tls_and_transport(tls_config, transport_config)
@@ -215,7 +227,11 @@ impl MoqConnection {
   /// Connects over raw QUIC (`moqt://authority[/path]`). ALPN here is
   /// the MOQT version string itself (no `h3`) -- that's what the relay's ALPN demux
   /// uses to route the connection to the raw-QUIC path instead of WebTransport.
-  async fn connect_quic(authority: &str, no_cert_validation: bool) -> Result<TransportConnection> {
+  async fn connect_quic(
+    authority: &str,
+    no_cert_validation: bool,
+    congestion_control: CongestionControl,
+  ) -> Result<TransportConnection> {
     let (host, port) = match authority.rsplit_once(':') {
       Some((host, port)) => (
         host,
@@ -245,7 +261,7 @@ impl MoqConnection {
     let quic_crypto_config = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?;
 
     let mut transport_config = TransportConfig::default();
-    transport_config.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    transport_config.congestion_controller_factory(controller_factory(congestion_control));
     transport_config.keep_alive_interval(Some(Duration::from_secs(3)));
     transport_config.max_idle_timeout(Some(Duration::from_secs(7).try_into()?));
 

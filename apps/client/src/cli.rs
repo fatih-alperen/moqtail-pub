@@ -99,6 +99,16 @@ pub enum Transport {
   Quic,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CongestionControl {
+  /// BBR: model-based, keeps the queue short
+  Bbr,
+  /// CUBIC: loss-based
+  Cubic,
+  /// NewReno: loss-based, the simple reference controller
+  Reno,
+}
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Command {
   /// Publish objects to a track
@@ -135,6 +145,10 @@ pub struct Cli {
   /// Transport to establish the moqt:// session over
   #[arg(long, value_enum, default_value = "web-transport")]
   pub transport: Transport,
+
+  /// QUIC congestion controller for this client's connections
+  #[arg(long, value_enum, default_value = "bbr")]
+  pub congestion_control: CongestionControl,
 
   /// Track namespace
   #[arg(long, short, default_value = "moqtail")]
@@ -444,4 +458,32 @@ pub struct Cli {
   /// is refused with PREFIX_OVERLAP.
   #[arg(long, value_enum)]
   pub overlap: Option<PrefixKind>,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use clap::Parser;
+
+  #[test]
+  fn congestion_control_defaults_to_bbr_and_accepts_each_name() {
+    let cli = Cli::try_parse_from(["moqtail-client", "-c", "subscribe"]).unwrap();
+    assert!(matches!(cli.congestion_control, CongestionControl::Bbr));
+
+    for (name, expected) in [
+      ("bbr", CongestionControl::Bbr),
+      ("cubic", CongestionControl::Cubic),
+      ("reno", CongestionControl::Reno),
+    ] {
+      let cli = Cli::try_parse_from([
+        "moqtail-client",
+        "-c",
+        "subscribe",
+        "--congestion-control",
+        name,
+      ])
+      .unwrap();
+      assert_eq!(cli.congestion_control, expected);
+    }
+  }
 }

@@ -326,7 +326,7 @@ async fn dial(server: &Server, authority: &str) -> Result<quinn::Connection> {
   let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(tls_config)?;
 
   let mut transport = quinn::TransportConfig::default();
-  transport.congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()));
+  transport.congestion_controller_factory(config.congestion_control.controller_factory());
   transport.keep_alive_interval(Some(config.keep_alive_interval));
   transport.max_idle_timeout(Some(config.max_idle_timeout.try_into()?));
   // The peer opens request streams toward us too.

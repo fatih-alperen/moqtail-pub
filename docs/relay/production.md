@@ -105,6 +105,12 @@ GOAWAY asks a client to open a new session, at the URI it carries or, without on
 
 `POST /api/v1/connections/<conn_id>/goaway` moves a single connection the same way.
 
+## Choose a congestion controller
+
+The relay uses BBR for every QUIC connection by default. Set `congestion_control` to `bbr`, `cubic` or `reno` in the config file.
+
+QUIC runs one congestion controller per connection, and every stream on that connection shares it. MOQT does not negotiate a controller, and an SSTS switching set is not a separate connection, so all switching sets on one connection use the same controller. The relay has no per-connection or per-set setting: change the config and restart the relay.
+
 ## Tune UDP throughput
 
 All media goes through the relay's UDP socket, so the socket's buffers and the number of sockets set how much traffic it can take.

@@ -21,15 +21,16 @@ cargo run --bin client -- --command <COMMAND> [OPTIONS]
 
 ## Global Options
 
-| Option                 | Short | Default                 | Description                                     |
-| ---------------------- | ----- | ----------------------- | ----------------------------------------------- |
-| `--command`            | `-c`  | _(required)_            | Command to run                                  |
-| `--server`             | `-s`  | `moqt://127.0.0.1:4433` | Server address as a `moqt://` URI               |
-| `--transport`          |       | `web-transport`         | Session transport (`web-transport` or `quic`)   |
-| `--namespace`          | `-n`  | `moqtail`               | Track namespace                                 |
-| `--track-name`         | `-T`  | `demo`                  | Track name                                      |
-| `--no-cert-validation` |       | `false`                 | Skip certificate validation                     |
-| `--delivery-mode`      |       | `subgroup`              | Object delivery mode (`subgroup` or `datagram`) |
+| Option                 | Short | Default                 | Description                                         |
+| ---------------------- | ----- | ----------------------- | --------------------------------------------------- |
+| `--command`            | `-c`  | _(required)_            | Command to run                                      |
+| `--server`             | `-s`  | `moqt://127.0.0.1:4433` | Server address as a `moqt://` URI                   |
+| `--transport`          |       | `web-transport`         | Session transport (`web-transport` or `quic`)       |
+| `--congestion-control` |       | `bbr`                   | QUIC congestion controller (`bbr`, `cubic`, `reno`) |
+| `--namespace`          | `-n`  | `moqtail`               | Track namespace                                     |
+| `--track-name`         | `-T`  | `demo`                  | Track name                                          |
+| `--no-cert-validation` |       | `false`                 | Skip certificate validation                         |
+| `--delivery-mode`      |       | `subgroup`              | Object delivery mode (`subgroup` or `datagram`)     |
 
 ## Publish Options
 

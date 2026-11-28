@@ -28,11 +28,40 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use validator::Validate;
 use wtransport::Identity;
-use wtransport::quinn::congestion::BbrConfig;
+use wtransport::quinn::congestion::{BbrConfig, ControllerFactory, CubicConfig, NewRenoConfig};
 use wtransport::quinn::{self, TransportConfig};
 use wtransport::tls::WEBTRANSPORT_ALPN;
 use wtransport::tls::rustls;
 use wtransport::tls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+
+/// The QUIC congestion controller every connection uses.
+///
+/// QUIC runs one controller per connection, shared by every stream on it. MOQT
+/// does not negotiate a controller, and an SSTS switching set is not a transport
+/// connection: its tracks share the connection's controller with every other
+/// stream. This option therefore selects one controller for the whole relay,
+/// including the connections it dials to cluster peers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CongestionControl {
+  /// BBR: model-based, keeps the queue short. The default.
+  Bbr,
+  /// CUBIC: loss-based, the common TCP default.
+  Cubic,
+  /// NewReno: loss-based, the simple reference controller.
+  Reno,
+}
+
+impl CongestionControl {
+  /// The quinn factory for this controller, fresh per connection.
+  pub fn controller_factory(self) -> Arc<dyn ControllerFactory + Send + Sync> {
+    match self {
+      Self::Bbr => Arc::new(BbrConfig::default()),
+      Self::Cubic => Arc::new(CubicConfig::default()),
+      Self::Reno => Arc::new(NewRenoConfig::default()),
+    }
+  }
+}
 
 /// Cache expiration strategy
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -107,6 +136,11 @@ pub struct AppConfig {
   #[default(Duration::from_secs(3))]
   #[serde(with = "humantime_serde")]
   pub keep_alive_interval: Duration,
+  /// QUIC congestion controller for every connection: `bbr`, `cubic` or `reno`.
+  /// QUIC applies it per connection; all streams and SSTS switching sets on that
+  /// connection share it.
+  #[default(CongestionControl::Bbr)]
+  pub congestion_control: CongestionControl,
   /// Number of groups cached per track
   #[default(1000)]
   pub cache_size: u16,
@@ -330,9 +364,8 @@ impl AppConfig {
 
   /// The QUIC transport settings every connection uses.
   pub fn transport_config(&self) -> Result<TransportConfig> {
-    // set up BBR congestion control
     let mut transport_config = TransportConfig::default();
-    transport_config.congestion_controller_factory(Arc::new(BbrConfig::default()));
+    transport_config.congestion_controller_factory(self.congestion_control.controller_factory());
     transport_config.keep_alive_interval(Some(self.keep_alive_interval));
     transport_config.max_idle_timeout(Some(self.max_idle_timeout.try_into()?));
     // Request flow control: bound the number of concurrent request streams a peer
@@ -579,6 +612,23 @@ mod tests {
       ..Default::default()
     };
     assert!(config.check_cluster().is_ok());
+  }
+
+  #[test]
+  fn congestion_control_defaults_to_bbr_and_parses_each_name() {
+    assert_eq!(
+      AppConfig::default().congestion_control,
+      CongestionControl::Bbr
+    );
+    for (name, expected) in [
+      ("bbr", CongestionControl::Bbr),
+      ("cubic", CongestionControl::Cubic),
+      ("reno", CongestionControl::Reno),
+    ] {
+      let config = from_yaml(&format!("congestion_control: {name}")).unwrap();
+      assert_eq!(config.congestion_control, expected);
+    }
+    assert!(from_yaml("congestion_control: vegas").is_err());
   }
 
   #[test]

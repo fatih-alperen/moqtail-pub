@@ -19,7 +19,7 @@
 //! property (`--timestamp`). Latency is the receive time minus that stamp, so the
 //! publisher and the subscribers must share a clock: run them on one machine.
 
-use crate::cli::Transport;
+use crate::cli::{CongestionControl, Transport};
 use crate::connection::MoqConnection;
 use crate::subscriber::{self, SubscribeConfig};
 use anyhow::Result;
@@ -93,6 +93,7 @@ fn sent_at(properties: Option<&Vec<ObjectProperty>>) -> Option<u64> {
 pub struct LoadConfig {
   pub server: String,
   pub transport: Transport,
+  pub congestion_control: CongestionControl,
   pub no_cert_validation: bool,
   pub sessions: u32,
   /// Sessions started per second; 0 starts them all at once.
@@ -119,12 +120,16 @@ pub async fn run(load: LoadConfig, subscribe: SubscribeConfig) -> Result<()> {
     config.perf = Some(recorder.clone());
     // Sessions started later stop at the same moment as the first ones.
     config.duration = duration.saturating_sub(started.elapsed().as_secs()).max(1);
-    let (server, transport, insecure) =
-      (load.server.clone(), load.transport, load.no_cert_validation);
+    let (server, transport, insecure, congestion_control) = (
+      load.server.clone(),
+      load.transport,
+      load.no_cert_validation,
+      load.congestion_control,
+    );
     let (connected, failed, ended_with_error) =
       (connected.clone(), failed.clone(), ended_with_error.clone());
     tasks.push(tokio::spawn(async move {
-      match MoqConnection::establish(&server, insecure, transport)
+      match MoqConnection::establish(&server, insecure, transport, congestion_control)
         .await
         .map(|(c, _)| c)
       {

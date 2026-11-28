@@ -65,8 +65,13 @@ async fn run(cli: Cli) -> Result<(), anyhow::Error> {
   }
   let mut server = cli.server.clone();
   loop {
-    let (moq_conn, goaway_rx) =
-      MoqConnection::establish(&server, cli.no_cert_validation, cli.transport).await?;
+    let (moq_conn, goaway_rx) = MoqConnection::establish(
+      &server,
+      cli.no_cert_validation,
+      cli.transport,
+      cli.congestion_control,
+    )
+    .await?;
     let connection = moq_conn.connection.clone();
     let Some(goaway) = until_goaway(run_command(Some(moq_conn), cli.clone()), goaway_rx).await?
     else {
@@ -210,6 +215,7 @@ async fn run_command(moq_conn: Option<MoqConnection>, cli: Cli) -> Result<(), an
         let load = perf::LoadConfig {
           server: cli.server,
           transport: cli.transport,
+          congestion_control: cli.congestion_control,
           no_cert_validation: cli.no_cert_validation,
           sessions: cli.sessions,
           ramp: cli.ramp,
